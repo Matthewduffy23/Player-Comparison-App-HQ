@@ -11,7 +11,7 @@ from pathlib import Path
 import io
 import re
 
-st.set_page_config(page_title="Player Comparison — SB Radar", layout="wide")
+st.set_page_config(page_title="Player Comparison Radar", layout="wide")
 
 # ====== make the tabs large & obvious at the very top ======
 st.markdown(
@@ -38,7 +38,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.title("Player Comparison — SB Radar")
+st.title("Player Comparison — Radar")
 
 # ---------------- Theme ----------------
 COL_A = "#C81E1E"          # deep red
