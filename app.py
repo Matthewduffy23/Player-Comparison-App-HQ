@@ -46,8 +46,8 @@ FILL_B = (29/255, 78/255, 216/255, 0.60)
 PAGE_BG   = "#FFFFFF"
 AX_BG     = "#FFFFFF"
 
-GRID_BAND_A = "#FFFFFF"
-GRID_BAND_B = "#E5E7EB"
+GRID_BAND_OUTER = "#E5E7EB"
+GRID_BAND_INNER = "#FFFFFF"
 RING_COLOR_INNER  = "#D1D5DB"
 RING_COLOR_OUTER  = "#D1D5DB"
 RING_LW     = 1.0
@@ -71,8 +71,8 @@ with st.expander("Radar settings", expanded=False):
 if radar_theme == "Dark":
     PAGE_BG = "#0a0f1c"
     AX_BG   = "#0a0f1c"
-    GRID_BAND_A = "#162235"   # outer-ish
-    GRID_BAND_B = "#0d1524"   # inner-ish
+    GRID_BAND_OUTER = "#162235"   # outer band
+    GRID_BAND_INNER = "#0d1524"   # next band inwards
     RING_COLOR_INNER = "#3a4050"
     RING_COLOR_OUTER = "#cbd5e1"
     LABEL_COLOR = "#f5f5f5"
@@ -81,8 +81,8 @@ if radar_theme == "Dark":
 else:
     PAGE_BG = "#ffffff"
     AX_BG   = "#ffffff"
-    GRID_BAND_A = "#ffffff"
-    GRID_BAND_B = "#e5e7eb"
+    GRID_BAND_OUTER = "#e5e7eb"   # outer band should be grey in light theme
+    GRID_BAND_INNER = "#ffffff"
     RING_COLOR_INNER = RING_COLOR_OUTER = "#d1d5db"
     LABEL_COLOR = "#0f172a"
     TICK_COLOR  = "#6b7280"
@@ -230,8 +230,9 @@ def draw_radar(labels, A_r, B_r, decile_ticks, headerA, subA, subA2, headerB, su
     # Alternating radial bands from INNER_HOLE to 100
     for i in range(NUM_RINGS-1):
         r0, r1 = ring_edges[i], ring_edges[i+1]
-        # match visual: alternate so outermost band is GRID_BAND_A
-        band = GRID_BAND_A if ((NUM_RINGS-2 - i) % 2 == 0) else GRID_BAND_B
+        # ensure OUTER band starts grey in light theme (and darker band in dark theme)
+        steps_from_outer = (NUM_RINGS-2) - i  # 0 at the outermost band
+        band = GRID_BAND_OUTER if (steps_from_outer % 2 == 0) else GRID_BAND_INNER
         ax.add_artist(Wedge((0,0), r1, 0, 360, width=(r1-r0),
                             transform=ax.transData._b, facecolor=band,
                             edgecolor="none", zorder=0.8))
