@@ -1,7 +1,3 @@
-# app.py — SB-style radar with BIG top tabs (5 roles)
-# Percentiles for plotting + raw-value ring labels
-# Solid fills, alternating bands, subtle tick labels, 11 rings
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -46,12 +42,14 @@ COL_B = "#1D4ED8"          # deep blue
 FILL_A = (200/255, 30/255, 30/255, 0.60)
 FILL_B = (29/255, 78/255, 216/255, 0.60)
 
+# Defaults (will be overwritten by theme switcher below)
 PAGE_BG   = "#FFFFFF"
 AX_BG     = "#FFFFFF"
 
 GRID_BAND_A = "#FFFFFF"
 GRID_BAND_B = "#E5E7EB"
-RING_COLOR  = "#D1D5DB"
+RING_COLOR_INNER  = "#D1D5DB"
+RING_COLOR_OUTER  = "#D1D5DB"
 RING_LW     = 1.0
 
 LABEL_COLOR = "#0F172A"
@@ -63,8 +61,32 @@ TICK_COLOR  = "#9CA3AF"
 MINUTES_FS    = 10
 MINUTES_COLOR = "#374151"
 
-NUM_RINGS   = 11
+NUM_RINGS   = 11  # 0..100 deciles (plus center hole)
 INNER_HOLE  = 10
+
+# -------------- Theme selector (extras) --------------
+with st.expander("Radar settings", expanded=False):
+    radar_theme = st.radio("Theme", ["Light", "Dark"], index=0, horizontal=True, key="radar_theme")
+
+if radar_theme == "Dark":
+    PAGE_BG = "#0a0f1c"
+    AX_BG   = "#0a0f1c"
+    GRID_BAND_A = "#162235"   # outer-ish
+    GRID_BAND_B = "#0d1524"   # inner-ish
+    RING_COLOR_INNER = "#3a4050"
+    RING_COLOR_OUTER = "#cbd5e1"
+    LABEL_COLOR = "#f5f5f5"
+    TICK_COLOR  = "#e5e7eb"
+    MINUTES_COLOR = "#f5f5f5"
+else:
+    PAGE_BG = "#ffffff"
+    AX_BG   = "#ffffff"
+    GRID_BAND_A = "#ffffff"
+    GRID_BAND_B = "#e5e7eb"
+    RING_COLOR_INNER = RING_COLOR_OUTER = "#d1d5db"
+    LABEL_COLOR = "#0f172a"
+    TICK_COLOR  = "#6b7280"
+    MINUTES_COLOR = "#374151"
 
 # -------------- Data ---------------
 @st.cache_data(show_spinner=False)
@@ -171,11 +193,19 @@ def group_mask(series: pd.Series, group: str) -> pd.Series:
         return s.str.startswith(('CF',))
     return pd.Series([True]*len(series), index=series.index)
 
-# -------------- Radar drawer --------------
-ring_radii = np.linspace(INNER_HOLE, 100, NUM_RINGS)
+# -------------- Radar helpers (extras integrated) --------------
+ring_edges = np.linspace(INNER_HOLE, 100, NUM_RINGS)
 
-def draw_radar(labels, A_r, B_r, ticks, headerA, subA, subA2, headerB, subB, subB2,
+def _tangent_rotation(ax, theta):
+    """Tangential rotation in display space, respecting theta offset/direction."""
+    return np.degrees(ax.get_theta_direction() * theta + ax.get_theta_offset()) - 90.0
+
+
+def draw_radar(labels, A_r, B_r, decile_ticks, headerA, subA, subA2, headerB, subB, subB2,
                show_avg=False, AVG_r=None):
+    """
+    decile_ticks: list of arrays (len==11) with true dataset deciles (0..100) for each metric
+    """
     N = len(labels)
     theta = np.linspace(0, 2*np.pi, N, endpoint=False)
     theta_closed = np.concatenate([theta, theta[:1]])
@@ -191,45 +221,69 @@ def draw_radar(labels, A_r, B_r, ticks, headerA, subA, subA2, headerB, subB, sub
     ax.set_theta_direction(-1)
 
     ax.set_xticks(theta)
-    ax.set_xticklabels(labels, fontsize=AXIS_FS, color=LABEL_COLOR, fontweight=600)
+    ax.set_xticklabels([])  # custom labels outside
     ax.set_yticks([])
     ax.grid(False)
     for s in ax.spines.values():
         s.set_visible(False)
 
+    # Alternating radial bands from INNER_HOLE to 100
     for i in range(NUM_RINGS-1):
-        r0, r1 = ring_radii[i], ring_radii[i+1]
-        band = GRID_BAND_A if i % 2 == 0 else GRID_BAND_B
+        r0, r1 = ring_edges[i], ring_edges[i+1]
+        # match visual: alternate so outermost band is GRID_BAND_A
+        band = GRID_BAND_A if ((NUM_RINGS-2 - i) % 2 == 0) else GRID_BAND_B
         ax.add_artist(Wedge((0,0), r1, 0, 360, width=(r1-r0),
                             transform=ax.transData._b, facecolor=band,
                             edgecolor="none", zorder=0.8))
 
+    # ring outlines — outer ring can be brighter
     ring_t = np.linspace(0, 2*np.pi, 361)
-    for r in ring_radii:
-        ax.plot(ring_t, np.full_like(ring_t, r), color=RING_COLOR, lw=RING_LW, zorder=0.9)
+    for j, r in enumerate(ring_edges):
+        col = RING_COLOR_OUTER if j == len(ring_edges)-1 else RING_COLOR_INNER
+        ax.plot(ring_t, np.full_like(ring_t, r), color=col, lw=RING_LW, zorder=0.9)
 
-    start_idx = 2
+    # numeric tick labels at each ring = TRUE dataset deciles (rounded to 1dp)
+    start_idx = 2  # show from 20th to reduce clutter
     for i, ang in enumerate(theta):
-        vals = ticks[i][start_idx:]
-        for rr, v in zip(ring_radii[start_idx:], vals):
-            ax.text(ang, rr-1.8, f"{v:.1f}", ha="center", va="center",
-                    fontsize=TICK_FS, color=TICK_COLOR, zorder=1.1)
+        vals = decile_ticks[i]
+        for rr, v in zip(ring_edges[start_idx:], vals[start_idx:]):
+            try:
+                ax.text(ang, rr-1.8, f"{float(v):.1f}", ha="center", va="center",
+                        fontsize=TICK_FS, color=TICK_COLOR, zorder=1.1)
+            except Exception:
+                ax.text(ang, rr-1.8, "", ha="center", va="center",
+                        fontsize=TICK_FS, color=TICK_COLOR, zorder=1.1)
 
+    # Outside labels: centered & upright, just beyond the 100 ring
+    OUTER_LABEL_R = 105.6
+    for ang, lab in zip(theta, labels):
+        rot = _tangent_rotation(ax, ang)
+        rot_norm = ((rot + 180.0) % 360.0) - 180.0
+        if rot_norm > 90 or rot_norm < -90:
+            rot += 180.0
+        ax.text(ang, OUTER_LABEL_R, lab, rotation=rot, rotation_mode="anchor",
+                ha="center", va="center", fontsize=AXIS_FS, color=LABEL_COLOR,
+                fontweight=600, clip_on=False, zorder=2.2)
+
+    # center hole
     ax.add_artist(Circle((0,0), radius=INNER_HOLE-0.6, transform=ax.transData._b,
                          color=PAGE_BG, zorder=1.2, ec="none"))
 
+    # Optional avg (50th percentile ring)
     if show_avg and AVG_r is not None:
         Avg = np.concatenate([AVG_r, AVG_r[:1]])
         ax.plot(theta_closed, Avg, lw=1.5, color="#94A3B8", ls="--", alpha=0.9, zorder=2.2)
 
+    # A & B polygons (percentile radii)
     ax.plot(theta_closed, Ar, color=COL_A, lw=2.2, zorder=3)
     ax.fill(theta_closed, Ar, color=FILL_A, zorder=2.5)
-
     ax.plot(theta_closed, Br, color=COL_B, lw=2.2, zorder=3)
     ax.fill(theta_closed, Br, color=FILL_B, zorder=2.5)
 
-    ax.set_rlim(0, 105)
+    # exact edge at 100 — labels allowed outside via clip_on=False
+    ax.set_rlim(0, 100)
 
+    # headers (teams / leagues / minutes)
     fig.text(0.12, 0.96,  headerA, color=COL_A, fontsize=TITLE_FS, fontweight="bold", ha="left")
     fig.text(0.12, 0.935, subA,    color=COL_A, fontsize=SUB_FS,      ha="left")
     fig.text(0.12, 0.915, subA2,   color=MINUTES_COLOR, fontsize=MINUTES_FS, ha="left")
@@ -238,11 +292,8 @@ def draw_radar(labels, A_r, B_r, ticks, headerA, subA, subA2, headerB, subB, sub
     fig.text(0.88, 0.935, subB,    color=COL_B, fontsize=SUB_FS,      ha="right")
     fig.text(0.88, 0.915, subB2,   color=MINUTES_COLOR, fontsize=MINUTES_FS, ha="right")
 
-    if show_avg and AVG_r is not None:
-        fig.text(0.2, 0.1, "— Average / 50th Percentile | Stats per 90",
-                 color="#6B7280", fontsize=8, ha="center")
-
     return fig
+
 
 def fmt_minutes(x):
     try:
@@ -317,6 +368,8 @@ def build_role_page(role_name: str):
         st.stop()
 
     labels = [clean_label(m) for m in metrics]
+
+    # Percentiles for A & B vs pool (0–100 scale)
     pool_pct = pool[metrics].rank(pct=True) * 100.0
 
     def pct_for(player: str) -> np.ndarray:
@@ -329,20 +382,17 @@ def build_role_page(role_name: str):
     B_r = pct_for(pB)
     AVG_r = np.full(len(metrics), 50.0)
 
-    axis_min = pool[metrics].min().values
-    axis_max = pool[metrics].max().values
-    pad = (axis_max - axis_min) * 0.07
-    axis_min = axis_min - pad
-    axis_max = axis_max + pad
-    axis_ticks = [np.linspace(axis_min[i], axis_max[i], NUM_RINGS) for i in range(len(labels))]
+    # TRUE deciles (0..100) for each metric — displayed at 1dp (extras)
+    qs = np.linspace(0, 100, NUM_RINGS)
+    decile_ticks = [np.nanpercentile(pool[m].values, qs) for m in metrics]
 
     if sort_by_gap:
         order = np.argsort(-np.abs(A_r - B_r))
-        labels    = [labels[i] for i in order]
-        A_r       = A_r[order]
-        B_r       = B_r[order]
-        AVG_r     = AVG_r[order]
-        axis_ticks = [axis_ticks[i] for i in order]
+        labels       = [labels[i] for i in order]
+        A_r          = A_r[order]
+        B_r          = B_r[order]
+        AVG_r        = AVG_r[order]
+        decile_ticks = [decile_ticks[i] for i in order]
 
     minsA = fmt_minutes(rowA.get("Minutes played"))
     minsB = fmt_minutes(rowB.get("Minutes played"))
@@ -354,9 +404,13 @@ def build_role_page(role_name: str):
     subB2   = f"{minsB}"
 
     with right:
-        fig = draw_radar(labels, A_r, B_r, axis_ticks,
+        fig = draw_radar(labels, A_r, B_r, decile_ticks,
                          headerA, subA, subA2, headerB, subB, subB2,
                          show_avg=show_avg, AVG_r=AVG_r)
+        st.caption(
+            "Ring labels show the **actual dataset values** at each decile (0–100th), rounded to **1 decimal place**. "
+            "Axis labels are centered on their metric angle, auto-flipped upright, and placed outside the 100 ring."
+        )
         st.pyplot(fig, use_container_width=True)
 
         buf_png = io.BytesIO()
@@ -384,6 +438,7 @@ with tabs[3]:
     build_role_page("Attackers")
 with tabs[4]:
     build_role_page("Forwards")
+
 
 
 
