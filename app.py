@@ -91,12 +91,12 @@ else:
 # -------------- Data ---------------
 @st.cache_data(show_spinner=False)
 def load_df():
-    p = Path(__file__).with_name("ORVV.csv")
+    p = Path(__file__).with_name("ORVVV.csv")
     return pd.read_csv(p) if p.exists() else None
 
 df = load_df()
 if df is None:
-    up = st.file_uploader("Upload ORVV.csv", type=["csv"])
+    up = st.file_uploader("Upload ORVVV.csv", type=["csv"])
     if not up:
         st.warning("Upload dataset to continue.")
         st.stop()
