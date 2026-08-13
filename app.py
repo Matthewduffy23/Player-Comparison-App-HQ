@@ -518,7 +518,7 @@ def build_role_page(role_name: str):
             "Ring labels show the **actual dataset values** at each decile (0–100th), rounded to **1 decimal place**. "
             "Axis labels are centered on their metric angle, auto-flipped upright, and placed outside the 100 ring."
         )
-        st.pyplot(fig, use_container_width=True)
+        st.pyplot(fig, width="stretch")
 
         buf_png = io.BytesIO()
         fig.savefig(buf_png, format="png", dpi=340, bbox_inches="tight")
