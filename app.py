@@ -7,6 +7,8 @@ from pathlib import Path
 import io
 import re
 
+from data_sources import season_source_picker
+
 st.set_page_config(page_title="Player Comparison Radar", layout="wide")
 
 # ====== make the tabs large & obvious at the very top ======
@@ -89,20 +91,19 @@ else:
     MINUTES_COLOR = "#374151"
 
 # -------------- Data ---------------
-@st.cache_data(show_spinner=False)
-def load_df():
-    p = Path(__file__).with_name("ORVVV.csv")
-    return pd.read_csv(p) if p.exists() else None
+# Was a bundled ORVV.csv loaded via a hardcoded filename. That filename was
+# misspelled "ORVVV.csv" (three V's) against a repo file named ORVV.csv (two),
+# so load_df() always returned None and the app silently fell through to manual
+# upload on every single open — git history shows ORVVV.csv never existed.
+# The bundled file is gone; data now comes from the same season-split files
+# every other Streamlit app in the ecosystem reads.
+df, loaded_seasons = season_source_picker("players", key_prefix="pc", default_count=2)
 
-df = load_df()
-if df is None:
-    up = st.file_uploader("Upload ORVVV.csv", type=["csv"])
-    if not up:
-        st.warning("Upload dataset to continue.")
-        st.stop()
-    df = pd.read_csv(up)
+if df is None or df.empty:
+    st.warning("Select at least one season above, or upload a CSV, to continue.")
+    st.stop()
 
-required = {"Player","League","Team","Position","Minutes played","Age"}
+required = {"Player","League","Team","Position","Minutes played","Age","Season"}
 missing = [c for c in required if c not in df.columns]
 if missing:
     st.error(f"Dataset missing required columns: {missing}")
@@ -110,6 +111,9 @@ if missing:
 
 df["Minutes played"] = pd.to_numeric(df["Minutes played"], errors="coerce")
 df["Age"]            = pd.to_numeric(df["Age"], errors="coerce")
+df["Season"]         = df["Season"].astype(str)
+
+st.caption(f"Loaded: {', '.join(loaded_seasons)}  —  {len(df):,} player-season rows")
 
 # -------------- Role metrics (your spec) ---------------
 CB_METRICS = [
@@ -304,6 +308,71 @@ def fmt_minutes(x):
         pass
     return "Minutes: N/A"
 
+# -------------- Row selection --------------
+# A row is identified by its DataFrame INDEX, never by re-matching on name.
+# The old code did `df[df["Player"] == pA].iloc[0]`, which takes whichever row
+# happens to sort first across every loaded season and club — so it could not
+# express "this player in 2022-23", and once more than one season was loaded it
+# silently charted an arbitrary one.
+#
+# Verified against all 318,137 rows in the nine season files:
+#   (Player, Team, League, Season)      collides on 3,811 rows (1.198%)
+#   (Wyscout ID, Team, League, Season)  collides on 0 rows
+# Two causes: the same person duplicated under two Wyscout IDs with identical
+# minutes (608 groups), and genuinely different records sharing a name at the
+# same club (808 groups). So the ID belongs in the label; without it two options
+# in the disambiguation list can read identically and be unpickable.
+def row_label(r):
+    mins = r.get("Minutes played")
+    try:
+        mins_s = f"{int(float(mins)):,} mins"
+    except (TypeError, ValueError):
+        mins_s = "mins N/A"
+    wid = str(r.get("Wyscout ID", "") or "").strip()
+    base = f"{r['Team']} — {r['League']} · {mins_s}"
+    return f"{base} · id {wid}" if wid else base
+
+
+def select_player_row(frame, players, key_prefix, default_index, side_label):
+    """Independent Player and Season selectors for one side of the comparison.
+
+    Season is its own selector rather than being folded into the player label,
+    which is what lets the SAME player be chosen on both sides in two different
+    seasons. Returns one row's index label, or None.
+
+    A third selector appears only when (player, season) is genuinely ambiguous:
+    a mid-season transfer gives one row per club, and continental competitions
+    add more rows for the same club and season. R. Durosinmi has four rows in
+    2025-26 alone. It defaults to the most-played row, which in practice is the
+    domestic league rather than a cup run.
+    """
+    p = st.selectbox(
+        f"Player {side_label}", players,
+        index=min(default_index, len(players) - 1), key=f"{key_prefix}_p",
+    )
+    sub = frame[frame["Player"] == p]
+    seasons = sorted(sub["Season"].dropna().astype(str).unique().tolist(), reverse=True)
+    if not seasons:
+        return None
+    s = st.selectbox(f"Season {side_label}", seasons, index=0, key=f"{key_prefix}_s")
+
+    cand = sub[sub["Season"].astype(str) == s].copy()
+    if cand.empty:
+        return None
+    cand["_m"] = pd.to_numeric(cand["Minutes played"], errors="coerce").fillna(0)
+    cand = cand.sort_values("_m", ascending=False)
+    if len(cand) == 1:
+        return cand.index[0]
+
+    opts = [row_label(r) for _, r in cand.iterrows()]
+    choice = st.selectbox(
+        f"Team / competition {side_label}", opts, index=0, key=f"{key_prefix}_r",
+        help="This player has more than one row in this season — a transfer, a "
+             "continental competition, or both. Pick which one to chart.",
+    )
+    return cand.index[opts.index(choice)]
+
+
 # -------------- Page builder per role --------------
 def build_role_page(role_name: str):
     role_defaults = [m for m in ROLE_METRICS.get(role_name, []) if m in df.columns]
@@ -328,8 +397,14 @@ def build_role_page(role_name: str):
             st.error("Not enough players for this filter.")
             st.stop()
 
-        pA = st.selectbox("Player A (red)", players, index=0, key=f"{role_name}_pA")
-        pB = st.selectbox("Player B (blue)", players, index=1, key=f"{role_name}_pB")
+        idxA = select_player_row(picker_pool, players, f"{role_name}_A", 0, "A (red)")
+        idxB = select_player_row(picker_pool, players, f"{role_name}_B", 1, "B (blue)")
+        if idxA is None or idxB is None:
+            st.warning("Pick a player and season on both sides.")
+            st.stop()
+        if idxA == idxB:
+            st.warning("Both sides point at the same row — change the player or the season.")
+            st.stop()
 
         numeric_cols = df.select_dtypes(include="number").columns.tolist()
         metrics = st.multiselect("Metrics",
@@ -344,17 +419,31 @@ def build_role_page(role_name: str):
         show_avg    = st.checkbox("Show pool average (thin line)", True, key=f"{role_name}_avg")
 
     # ----- data slice -----
-    rowA = df[df["Player"] == pA].iloc[0]
-    rowB = df[df["Player"] == pB].iloc[0]
+    rowA = df.loc[idxA]
+    rowB = df.loc[idxB]
+    pA, pB = rowA["Player"], rowB["Player"]
 
-    union_leagues = {rowA["League"], rowB["League"]}
+    # Pool = union of each side's (League, SEASON) pair. Season has to be part
+    # of the key: filtering on league alone, once more than one season is
+    # loaded, ranks a player against a pool that mixes several seasons of that
+    # league at once, which is meaningless and fails silently.
+    pairs = {(rowA["League"], rowA["Season"]), (rowB["League"], rowB["Season"])}
+    league_season = pd.Series(list(zip(df["League"], df["Season"])), index=df.index)
     mask_pool = (
         group_mask(df["Position"], role_name) &
-        df["League"].isin(union_leagues) &
+        league_season.isin(pairs) &
         df["Minutes played"].between(min_minutes, max_minutes) &
         df["Age"].between(min_age, max_age)
     )
     pool = df[mask_pool].copy()
+
+    # Guarantee both charted rows are in the pool. The minutes and age sliders
+    # are meant to shape the comparison POOL, not to exclude the two players
+    # being charted — without this, dragging a slider past either player's own
+    # value dropped them and the radar came back empty with no explanation.
+    absent = [i for i in (idxA, idxB) if i not in pool.index]
+    if absent:
+        pool = pd.concat([pool, df.loc[absent]])
 
     missing_m = [m for m in metrics if m not in pool.columns]
     if missing_m:
@@ -368,19 +457,29 @@ def build_role_page(role_name: str):
         st.warning("No players remain in pool after filters.")
         st.stop()
 
+    # dropna() runs AFTER the re-add above, so a charted row with a blank value
+    # in any selected metric can still be evicted here — and the .loc lookups
+    # below would then raise a bare KeyError. Say which side and which metric.
+    for _idx, _side, _row in ((idxA, "A", rowA), (idxB, "B", rowB)):
+        if _idx not in pool.index:
+            _blank = [m for m in metrics if pd.isna(pd.to_numeric(pd.Series([_row.get(m)]), errors="coerce").iloc[0])]
+            st.warning(
+                f"{_row['Player']} ({_row['Season']}, {_row['Team']}) has no value for "
+                f"{', '.join(_blank) or 'one of the selected metrics'} — side {_side} "
+                f"cannot be charted. Deselect that metric or pick another season."
+            )
+            st.stop()
+
     labels = [clean_label(m) for m in metrics]
 
-    # Percentiles for A & B vs pool (0–100 scale)
+    # Percentiles for A & B vs pool (0–100 scale). Looked up by row INDEX. The
+    # old pct_for() re-matched on player name and averaged across every row that
+    # matched, so a player with a transfer or a cup run was charted as the MEAN
+    # of their season rows rather than the row actually selected — and with two
+    # seasons loaded it averaged across seasons too.
     pool_pct = pool[metrics].rank(pct=True) * 100.0
-
-    def pct_for(player: str) -> np.ndarray:
-        idx = pool[pool["Player"] == player].index
-        if len(idx) == 0:
-            return np.full(len(metrics), np.nan)
-        return pool_pct.loc[idx, :].mean(axis=0).values
-
-    A_r = pct_for(pA)
-    B_r = pct_for(pB)
+    A_r = pool_pct.loc[idxA].to_numpy(dtype=float)
+    B_r = pool_pct.loc[idxB].to_numpy(dtype=float)
     AVG_r = np.full(len(metrics), 50.0)
 
     # TRUE deciles (0..100) for each metric — displayed at 1dp (extras)
@@ -395,14 +494,21 @@ def build_role_page(role_name: str):
         AVG_r        = AVG_r[order]
         decile_ticks = [decile_ticks[i] for i in order]
 
+    # Season goes in the subtitle. On a same-player cross-season chart the two
+    # headers are otherwise identical and the graphic is unreadable.
     minsA = fmt_minutes(rowA.get("Minutes played"))
     minsB = fmt_minutes(rowB.get("Minutes played"))
     headerA = f"{pA}"
     subA    = f"{rowA['Team']} — {rowA['League']}"
-    subA2   = f"{minsA}"
+    subA2   = f"{rowA['Season']} · {minsA}"
     headerB = f"{pB}"
     subB    = f"{rowB['Team']} — {rowB['League']}"
-    subB2   = f"{minsB}"
+    subB2   = f"{rowB['Season']} · {minsB}"
+
+    # Filenames need the season too, else A-vs-A across two seasons writes the
+    # same name twice and the second download overwrites the first.
+    fname = (f"{pA.replace(' ','_')}_{rowA['Season']}"
+             f"_vs_{pB.replace(' ','_')}_{rowB['Season']}_radar")
 
     with right:
         fig = draw_radar(labels, A_r, B_r, decile_ticks,
@@ -417,13 +523,13 @@ def build_role_page(role_name: str):
         buf_png = io.BytesIO()
         fig.savefig(buf_png, format="png", dpi=340, bbox_inches="tight")
         st.download_button("⬇️ Download PNG", data=buf_png.getvalue(),
-                           file_name=f"{pA.replace(' ','_')}_vs_{pB.replace(' ','_')}_radar_SB.png",
+                           file_name=f"{fname}.png",
                            mime="image/png", key=f"{role_name}_png")
 
         buf_svg = io.BytesIO()
         fig.savefig(buf_svg, format="svg", bbox_inches="tight")
         st.download_button("⬇️ Download SVG", data=buf_svg.getvalue(),
-                           file_name=f"{pA.replace(' ','_')}_vs_{pB.replace(' ','_')}_radar_SB.svg",
+                           file_name=f"{fname}.svg",
                            mime="image/svg+xml", key=f"{role_name}_svg")
 
 # ====== THE BIG, CLEAR TOGGLE ======
