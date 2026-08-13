@@ -36,7 +36,12 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.title("Player Comparison — Radar")
+st.title("Comparison — Radar")
+
+# Players and Teams read different files and have different identity rules, so
+# the mode is chosen before any data is loaded — picking one avoids paying for
+# the other's season files, which are tens of MB each.
+MODE = st.radio("Compare", ["Players", "Teams"], horizontal=True, key="mode")
 
 # ---------------- Theme ----------------
 COL_A = "#C81E1E"          # deep red
@@ -97,23 +102,25 @@ else:
 # upload on every single open — git history shows ORVVV.csv never existed.
 # The bundled file is gone; data now comes from the same season-split files
 # every other Streamlit app in the ecosystem reads.
-df, loaded_seasons = season_source_picker("players", key_prefix="pc", default_count=2)
+df = None
+if MODE == "Players":
+    df, loaded_seasons = season_source_picker("players", key_prefix="pc", default_count=2)
 
-if df is None or df.empty:
-    st.warning("Select at least one season above, or upload a CSV, to continue.")
-    st.stop()
+    if df is None or df.empty:
+        st.warning("Select at least one season above, or upload a CSV, to continue.")
+        st.stop()
 
-required = {"Player","League","Team","Position","Minutes played","Age","Season"}
-missing = [c for c in required if c not in df.columns]
-if missing:
-    st.error(f"Dataset missing required columns: {missing}")
-    st.stop()
+    required = {"Player","League","Team","Position","Minutes played","Age","Season"}
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        st.error(f"Dataset missing required columns: {missing}")
+        st.stop()
 
-df["Minutes played"] = pd.to_numeric(df["Minutes played"], errors="coerce")
-df["Age"]            = pd.to_numeric(df["Age"], errors="coerce")
-df["Season"]         = df["Season"].astype(str)
+    df["Minutes played"] = pd.to_numeric(df["Minutes played"], errors="coerce")
+    df["Age"]            = pd.to_numeric(df["Age"], errors="coerce")
+    df["Season"]         = df["Season"].astype(str)
 
-st.caption(f"Loaded: {', '.join(loaded_seasons)}  —  {len(df):,} player-season rows")
+    st.caption(f"Loaded: {', '.join(loaded_seasons)}  —  {len(df):,} player-season rows")
 
 # -------------- Role metrics (your spec) ---------------
 CB_METRICS = [
@@ -532,19 +539,246 @@ def build_role_page(role_name: str):
                            file_name=f"{fname}.svg",
                            mime="image/svg+xml", key=f"{role_name}_svg")
 
-# ====== THE BIG, CLEAR TOGGLE ======
-tabs = st.tabs(["Centre Backs", "Full Backs", "Midfielders", "Attackers", "Forwards"])
+# ══════════════════════════════════════════════════════════════════════════
+# TEAMS MODE
+# ══════════════════════════════════════════════════════════════════════════
+# Metric list lifted from team_hq.py's Section 8 comparison radar, which is the
+# agreed visual foundation. The DATA handling below is deliberately not a copy
+# of that section: team_hq.py loads exactly one season file, so it never had to
+# key on season, and its percentile helper uses (s <= v).mean(), which behaves
+# like rank(method='max') on ties. This app uses rank(pct=True,
+# method='average') everywhere, so teams follow that too rather than importing
+# a second convention that would disagree with the player side on tied values.
+TEAM_RADAR_METRICS = [
+    "xG p90", "Goals p90", "Touches in Box p90",
+    "xG Against p90", "Goals Against p90", "PPDA",
+    "Possession %", "Passes p90", "Passes to Final Third p90",
+    "Long Passes p90", "Points p90", "Expected Points p90",
+]
 
-with tabs[0]:
-    build_role_page("Centre Backs")
-with tabs[1]:
-    build_role_page("Full Backs")
-with tabs[2]:
-    build_role_page("Midfielders")
-with tabs[3]:
-    build_role_page("Attackers")
-with tabs[4]:
-    build_role_page("Forwards")
+# Lower is better for these — the percentile is inverted so "good" is always
+# outward on the radar, and the ring tick labels are reversed to match.
+TEAM_INVERT_METRICS = {"xG Against p90", "Goals Against p90", "Shots Against p90", "PPDA"}
+
+TEAM_LABEL_SHORT = {
+    "Touches in Box p90": "Touches in Box",
+    "Passes to Final Third p90": "Passes to Final 3rd",
+    "Expected Points p90": "xPoints",
+    "Goals Against p90": "Goals Against",
+    "xG Against p90": "xG Against",
+    "Long Passes p90": "Long Passes",
+    "Possession %": "Possession",
+}
+
+
+def team_label(m):
+    if m in TEAM_LABEL_SHORT:
+        return TEAM_LABEL_SHORT[m]
+    return re.sub(r"\s*p90$", "", m).strip()
+
+
+def derive_team_rates(frame):
+    """Points p90 / Expected Points p90 are per-match rates the source file does
+    not carry directly. Same derivation team_hq.py does, but applied per row so
+    it stays correct when several seasons are loaded at once."""
+    out = frame.copy()
+    matches = pd.to_numeric(out.get("Matches"), errors="coerce").replace(0, np.nan)
+    for src, dst in (("Points", "Points p90"), ("Expected Points", "Expected Points p90")):
+        if src in out.columns and dst not in out.columns:
+            vals = pd.to_numeric(out[src], errors="coerce")
+            out[dst] = vals / matches if matches is not None else vals
+    return out
+
+
+def team_row_label(r):
+    """Teams need the LEAGUE to be identifiable, for a different reason than
+    players needed a Wyscout ID. Verified across all 7,038 rows in the six team
+    season files:
+        (Team, Season)          collides on 76 rows (1.080%)
+        (Team, League, Season)  collides on 0 rows
+    The collisions are real distinct clubs sharing a name across countries —
+    Arsenal (England 1) and Arsenal (Argentina 1), Liverpool and Liverpool
+    (Uruguay 1), Everton and Everton (Chile 1). There is no team ID column, so
+    league IS the disambiguator here."""
+    return f"{r['League']}"
+
+
+def select_team_row(frame, teams, key_prefix, default_index, side_label):
+    """Independent Team and Season selectors, mirroring select_player_row.
+
+    A third League selector appears only when (team, season) is ambiguous, which
+    for teams means two different clubs share a name in that season.
+    """
+    t = st.selectbox(
+        f"Team {side_label}", teams,
+        index=min(default_index, len(teams) - 1), key=f"{key_prefix}_t",
+    )
+    sub = frame[frame["Team"] == t]
+    seasons = sorted(sub["Season"].dropna().astype(str).unique().tolist(), reverse=True)
+    if not seasons:
+        return None
+    s = st.selectbox(f"Season {side_label}", seasons, index=0, key=f"{key_prefix}_s")
+
+    cand = sub[sub["Season"].astype(str) == s]
+    if cand.empty:
+        return None
+    if len(cand) == 1:
+        return cand.index[0]
+
+    opts = [team_row_label(r) for _, r in cand.iterrows()]
+    choice = st.selectbox(
+        f"League {side_label}", opts, index=0, key=f"{key_prefix}_l",
+        help="Two different clubs share this name in this season — pick which one.",
+    )
+    return cand.index[opts.index(choice)]
+
+
+def build_team_page(tdf):
+    left, right = st.columns([1, 3], vertical_alignment="top")
+
+    tdf = derive_team_rates(tdf)
+    avail = [m for m in TEAM_RADAR_METRICS if m in tdf.columns]
+
+    with left:
+        st.subheader("Controls (teams)")
+
+        teams = sorted(tdf["Team"].dropna().astype(str).unique().tolist())
+        if len(teams) < 2:
+            st.error("Not enough teams in the loaded seasons.")
+            st.stop()
+
+        idxA = select_team_row(tdf, teams, "team_A", 0, "A (red)")
+        idxB = select_team_row(tdf, teams, "team_B", 1, "B (blue)")
+        if idxA is None or idxB is None:
+            st.warning("Pick a team and season on both sides.")
+            st.stop()
+        if idxA == idxB:
+            st.warning("Both sides point at the same row — change the team or the season.")
+            st.stop()
+
+        metrics = st.multiselect("Metrics", avail, avail, key="team_metrics")
+        if len(metrics) < 5:
+            st.warning("Pick at least 5 metrics.")
+            st.stop()
+        sort_by_gap = st.checkbox("Sort axes by biggest gap", False, key="team_gap")
+        show_avg    = st.checkbox("Show pool average (thin line)", True, key="team_avg")
+
+    rowA = tdf.loc[idxA]
+    rowB = tdf.loc[idxB]
+
+    # Pool = union of each side's (League, SEASON), exactly as on the player
+    # side. team_hq.py pools on league alone, which is only equivalent because
+    # it loads a single season; here that would rank a team against a mixture of
+    # its own league across several years.
+    pairs = {(rowA["League"], rowA["Season"]), (rowB["League"], rowB["Season"])}
+    league_season = pd.Series(list(zip(tdf["League"], tdf["Season"])), index=tdf.index)
+    pool = tdf[league_season.isin(pairs)].copy()
+
+    for m in metrics:
+        pool[m] = pd.to_numeric(pool[m], errors="coerce")
+    pool = pool.dropna(subset=metrics)
+    if pool.empty:
+        st.warning("No teams remain in the pool for these metrics.")
+        st.stop()
+    for idx, side, row in ((idxA, "A", rowA), (idxB, "B", rowB)):
+        if idx not in pool.index:
+            st.warning(
+                f"{row['Team']} ({row['Season']}, {row['League']}) has no value for one of "
+                f"the selected metrics — side {side} cannot be charted."
+            )
+            st.stop()
+
+    # rank(pct=True, method='average', ascending=not invert) — the convention
+    # used across this app. NOT 100 - rank_asc(), which is off by exactly 100/n
+    # against a reversed sort, and NOT (s <= v).mean(), which inflates ties.
+    pct = pd.DataFrame(index=pool.index)
+    for m in metrics:
+        pct[m] = pool[m].rank(pct=True, method="average",
+                              ascending=(m not in TEAM_INVERT_METRICS)) * 100.0
+
+    A_r = pct.loc[idxA, metrics].to_numpy(dtype=float)
+    B_r = pct.loc[idxB, metrics].to_numpy(dtype=float)
+    AVG_r = np.full(len(metrics), 50.0)
+
+    labels = [team_label(m) for m in metrics]
+
+    # Ring labels show real values at each decile. For an inverted metric the
+    # scale runs the other way, so the tick sequence is reversed to keep the
+    # outermost ring meaning "best" on every axis.
+    qs = np.linspace(0, 100, NUM_RINGS)
+    decile_ticks = []
+    for m in metrics:
+        vals = np.nanpercentile(pool[m].values, qs)
+        decile_ticks.append(vals[::-1] if m in TEAM_INVERT_METRICS else vals)
+
+    if sort_by_gap:
+        order = np.argsort(-np.abs(A_r - B_r))
+        labels       = [labels[i] for i in order]
+        A_r          = A_r[order]
+        B_r          = B_r[order]
+        AVG_r        = AVG_r[order]
+        decile_ticks = [decile_ticks[i] for i in order]
+
+    def _mts(r):
+        try:
+            return f"{int(float(r.get('Matches')))} matches"
+        except (TypeError, ValueError):
+            return "Matches N/A"
+
+    with right:
+        fig = draw_radar(
+            labels, A_r, B_r, decile_ticks,
+            rowA["Team"], f"{rowA['League']}", f"{rowA['Season']} · {_mts(rowA)}",
+            rowB["Team"], f"{rowB['League']}", f"{rowB['Season']} · {_mts(rowB)}",
+            show_avg=show_avg, AVG_r=AVG_r,
+        )
+        st.caption(
+            "Ring labels show the **actual dataset values** at each decile. Polygons are "
+            "**percentile rank** against the combined (league, season) pool of both teams. "
+            "Lower-is-better metrics (xG Against, Goals Against, PPDA) are inverted so "
+            "outward is always better."
+        )
+        st.pyplot(fig, width="stretch")
+
+        fname = (f"{rowA['Team'].replace(' ','_')}_{rowA['Season']}"
+                 f"_vs_{rowB['Team'].replace(' ','_')}_{rowB['Season']}_team_radar")
+        buf_png = io.BytesIO()
+        fig.savefig(buf_png, format="png", dpi=340, bbox_inches="tight")
+        st.download_button("⬇️ Download PNG", data=buf_png.getvalue(),
+                           file_name=f"{fname}.png", mime="image/png", key="team_png")
+        buf_svg = io.BytesIO()
+        fig.savefig(buf_svg, format="svg", bbox_inches="tight")
+        st.download_button("⬇️ Download SVG", data=buf_svg.getvalue(),
+                           file_name=f"{fname}.svg", mime="image/svg+xml", key="team_svg")
+
+
+# ====== THE BIG, CLEAR TOGGLE ======
+if MODE == "Players":
+    tabs = st.tabs(["Centre Backs", "Full Backs", "Midfielders", "Attackers", "Forwards"])
+
+    with tabs[0]:
+        build_role_page("Centre Backs")
+    with tabs[1]:
+        build_role_page("Full Backs")
+    with tabs[2]:
+        build_role_page("Midfielders")
+    with tabs[3]:
+        build_role_page("Attackers")
+    with tabs[4]:
+        build_role_page("Forwards")
+else:
+    tdf, team_seasons = season_source_picker("teams", key_prefix="tc", default_count=2)
+    if tdf is None or tdf.empty:
+        st.warning("Select at least one team season above, or upload a CSV, to continue.")
+        st.stop()
+    t_required = {"Team", "League", "Season"}
+    t_missing = [c for c in t_required if c not in tdf.columns]
+    if t_missing:
+        st.error(f"Team dataset missing required columns: {t_missing}")
+        st.stop()
+    tdf["Season"] = tdf["Season"].astype(str)
+    st.caption(f"Loaded: {', '.join(team_seasons)}  —  {len(tdf):,} team-season rows")
+    build_team_page(tdf)
 
 
 
