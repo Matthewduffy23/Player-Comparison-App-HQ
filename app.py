@@ -402,16 +402,16 @@ def build_role_page(role_name: str):
         players = sorted(picker_pool["Player"].dropna().unique().tolist())
         if len(players) < 2:
             st.error("Not enough players for this filter.")
-            st.stop()
+            return
 
         idxA = select_player_row(picker_pool, players, f"{role_name}_A", 0, "A (red)")
         idxB = select_player_row(picker_pool, players, f"{role_name}_B", 1, "B (blue)")
         if idxA is None or idxB is None:
             st.warning("Pick a player and season on both sides.")
-            st.stop()
+            return
         if idxA == idxB:
             st.warning("Both sides point at the same row — change the player or the season.")
-            st.stop()
+            return
 
         numeric_cols = df.select_dtypes(include="number").columns.tolist()
         metrics = st.multiselect("Metrics",
@@ -420,7 +420,7 @@ def build_role_page(role_name: str):
                                  key=f"{role_name}_metrics")
         if len(metrics) < 5:
             st.warning("Pick at least 5 metrics.")
-            st.stop()
+            return
 
         sort_by_gap = st.checkbox("Sort axes by biggest gap", False, key=f"{role_name}_gap")
         show_avg    = st.checkbox("Show pool average (thin line)", True, key=f"{role_name}_avg")
@@ -455,14 +455,14 @@ def build_role_page(role_name: str):
     missing_m = [m for m in metrics if m not in pool.columns]
     if missing_m:
         st.error(f"Missing metric columns: {missing_m}")
-        st.stop()
+        return
 
     for m in metrics:
         pool[m] = pd.to_numeric(pool[m], errors="coerce")
     pool = pool.dropna(subset=metrics)
     if pool.empty:
         st.warning("No players remain in pool after filters.")
-        st.stop()
+        return
 
     # dropna() runs AFTER the re-add above, so a charted row with a blank value
     # in any selected metric can still be evicted here — and the .loc lookups
@@ -475,7 +475,7 @@ def build_role_page(role_name: str):
                 f"{', '.join(_blank) or 'one of the selected metrics'} — side {_side} "
                 f"cannot be charted. Deselect that metric or pick another season."
             )
-            st.stop()
+            return
 
     labels = [clean_label(m) for m in metrics]
 
@@ -645,21 +645,21 @@ def build_team_page(tdf):
         teams = sorted(tdf["Team"].dropna().astype(str).unique().tolist())
         if len(teams) < 2:
             st.error("Not enough teams in the loaded seasons.")
-            st.stop()
+            return
 
         idxA = select_team_row(tdf, teams, "team_A", 0, "A (red)")
         idxB = select_team_row(tdf, teams, "team_B", 1, "B (blue)")
         if idxA is None or idxB is None:
             st.warning("Pick a team and season on both sides.")
-            st.stop()
+            return
         if idxA == idxB:
             st.warning("Both sides point at the same row — change the team or the season.")
-            st.stop()
+            return
 
         metrics = st.multiselect("Metrics", avail, avail, key="team_metrics")
         if len(metrics) < 5:
             st.warning("Pick at least 5 metrics.")
-            st.stop()
+            return
         sort_by_gap = st.checkbox("Sort axes by biggest gap", False, key="team_gap")
         show_avg    = st.checkbox("Show pool average (thin line)", True, key="team_avg")
 
@@ -679,14 +679,14 @@ def build_team_page(tdf):
     pool = pool.dropna(subset=metrics)
     if pool.empty:
         st.warning("No teams remain in the pool for these metrics.")
-        st.stop()
+        return
     for idx, side, row in ((idxA, "A", rowA), (idxB, "B", rowB)):
         if idx not in pool.index:
             st.warning(
                 f"{row['Team']} ({row['Season']}, {row['League']}) has no value for one of "
                 f"the selected metrics — side {side} cannot be charted."
             )
-            st.stop()
+            return
 
     # rank(pct=True, method='average', ascending=not invert) — the convention
     # used across this app. NOT 100 - rank_asc(), which is off by exactly 100/n
